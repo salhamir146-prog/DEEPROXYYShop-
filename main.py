@@ -1,4 +1,3 @@
-import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 import config
@@ -6,7 +5,7 @@ import database as db
 from handlers import *
 from admin_handlers import *
 
-async def main():
+def main():
     # راه‌اندازی دیتابیس
     db.init_db()
     
@@ -39,8 +38,8 @@ async def main():
     print(f"✅ ادمین اصلی: {config.MASTER_ADMIN}")
     print(f"✅ تعداد ادمین‌ها: {len(config.ADMIN_IDS)}")
     
-    # شروع دریافت پیام‌ها با Polling
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # شروع دریافت پیام‌ها با روش استاندارد و ساده
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
