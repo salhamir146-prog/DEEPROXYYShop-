@@ -1,5 +1,5 @@
-from telegram import Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, Updater
 import config
 import database as db
 from handlers import *
@@ -9,8 +9,9 @@ def main():
     # راه‌اندازی دیتابیس
     db.init_db()
     
-    # ساخت اپلیکیشن
-    app = Application.builder().token(config.TOKEN).build()
+    # ساخت اپلیکیشن با روش Updater (سازگار با پایتون 3.11+)
+    updater = Updater(token=config.TOKEN)
+    app = updater.application
     
     # ========== دستورات عمومی ==========
     app.add_handler(CommandHandler("start", start))
@@ -37,7 +38,10 @@ def main():
     print("🤖 ربات روشن شد!")
     print(f"✅ ادمین اصلی: {config.MASTER_ADMIN}")
     print(f"✅ تعداد ادمین‌ها: {len(config.ADMIN_IDS)}")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    # شروع دریافت پیام‌ها با روش Polling
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     main()
