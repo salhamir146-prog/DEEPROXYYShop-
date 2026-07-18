@@ -1,3 +1,4 @@
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 import config
@@ -5,18 +6,18 @@ import database as db
 from handlers import *
 from admin_handlers import *
 
-def main():
+async def main():
     # راه‌اندازی دیتابیس
     db.init_db()
     
-    # ساخت اپلیکیشن با روش استاندارد
+    # ساخت اپلیکیشن
     app = Application.builder().token(config.TOKEN).build()
     
     # ========== دستورات عمومی ==========
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_receipt))
     
-    # ========== دستور مخفی ادمین (فقط برای MASTER_ADMIN) ==========
+    # ========== دستور مخفی ادمین ==========
     app.add_handler(MessageHandler(
         filters.Regex(r'^hahbyhh555466mamabbbnn$'), 
         admin_panel
@@ -38,8 +39,8 @@ def main():
     print(f"✅ ادمین اصلی: {config.MASTER_ADMIN}")
     print(f"✅ تعداد ادمین‌ها: {len(config.ADMIN_IDS)}")
     
-    # شروع دریافت پیام‌ها با روش Polling
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # شروع دریافت پیام‌ها با Polling
+    await app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
