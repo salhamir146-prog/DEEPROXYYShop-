@@ -4,223 +4,321 @@ import config
 import database as db
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """پنل مدیریت - برای هر دو ادمین"""
     user_id = update.effective_user.id
-    
-    # هر دو ادمین می‌تونن وارد بشن
     if user_id not in config.SECRET_ADMINS:
         await update.message.reply_text("⛔ شما دسترسی ندارید!")
         return
-    
     keyboard = [
         [InlineKeyboardButton("📊 تراکنش‌های در انتظار", callback_data="pending_list")],
         [InlineKeyboardButton("➕ افزودن محصول", callback_data="add_product")],
         [InlineKeyboardButton("📝 ویرایش محصول", callback_data="edit_product")],
         [InlineKeyboardButton("🗑 حذف محصول", callback_data="delete_product")],
         [InlineKeyboardButton("📈 آمار", callback_data="stats")],
-        [InlineKeyboardButton("💬 مشاهده چت کاربران", callback_data="view_chats")],  # جدید
+        [InlineKeyboardButton("💬 مشاهده چت کاربران", callback_data="view_chats")],
+        [InlineKeyboardButton("✏️ ویرایش ظاهر ربات", callback_data="edit_ui")],
+        [InlineKeyboardButton("📢 پیام همگانی", callback_data="broadcast")],
     ]
-    
     await update.message.reply_text(
-        "🔐 **پنل مدیریت**\n\n"
-        "لطفاً یکی از گزینه‌ها رو انتخاب کن:",
+        "🔐 **پنل مدیریت**\n\nلطفاً یکی از گزینه‌ها رو انتخاب کن:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# ========== بخش جدید: مشاهده چت کاربران ==========
+# ========== تأیید/رد تراکنش (با ارسال دستی) ==========
+async def approve_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    admin_id = query.from_user.id
+    if admin_id not in config.ADMIN_IDS:
+        await query.answer("⛔ شما دسترسی ندارید!", show_alert=True)
+        return
+    trans_id = int(query.data.split("_")[1])
+    transaction = db.get_transaction(trans_id)
+    if not transaction or transaction[5] != 'pending':
+        await query.message.edit_caption("❌ این تراکنش قابل پردازش نیست!")
+        return
+    db.update_transaction_status(trans_id, 'approved', assigned_code=None)
+    await query.message.edit_caption(
+        f"✅ **تراکنش #{trans_id} تأیید شد!**\n\n"
+        "👤 برای ارسال اپل‌آیدی به کاربر، از دکمه زیر استفاده کنید:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 ارسال پیام به خریدار", callback_data=f"send_product_{trans_id}")]
+        ])
+    )
+    await query.answer("✅ تأیید شد!", show_alert=True)
 
-async def view_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """نمایش لیست کاربرانی که با ربات چت کردن"""
+async def reject_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    admin_id = query.from_user.id
+    if admin_id not in config.ADMIN_IDS:
+        await query.answer("⛔ شما دسترسی ندارید!", show_alert=True)
+        return
+    trans_id = int(query.data.split("_")[1])
+    transaction = db.get_transaction(trans_id)
+    if not transaction or transaction[5] != 'pending':
+        await query.message.edit_caption("❌ این تراکنش قابل پردازش نیست!")
+        return
+    db.update_transaction_status(trans_id, 'rejected')
+    try:
+        await context.bot.send_message(
+            chat_id=transaction[1],
+            text="❌ متأسفانه رسید شما تأیید نشد.\nلطفاً با پشتیبانی تماس بگیرید."
+        )
+    except:
+        pass
+    await query.message.edit_caption(f"❌ تراکنش {trans_id} رد شد.")
+    await query.answer("❌ رد شد!", show_alert=True)
+
+# ========== ارسال دستی محصول توسط ادمین ==========
+async def send_product_manually(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
-    user_id = query.from_user.id
+    trans_id = int(query.data.split("_")[2])
+    transaction = db.get_transaction(trans_id)
+    if not transaction:
+        await query.message.edit_text("❌ تراکنش یافت نشد!")
+        return
+    user_id = transaction[1]
+    context.user_data['manual_reply_user'] = user_id
+    context.user_data['manual_trans_id'] = trans_id
+    product = db.get_product(transaction[2])
+    product_name = product[1] if product else "نامشخص"
+    await query.message.edit_text(
+        f"✏️ **ارسال اطلاعات به خریدار**\n\n"
+        f"🆔 آیدی کاربر: `{user_id}`\n"
+        f"📦 محصول: {product_name}\n\n"
+        "📩 **لطفاً پیام حاوی اپل‌آیدی و رمز را به‌صورت متن ارسال کنید.**"
+    )
+
+# ========== هندلر پیام ادمین به کاربر ==========
+async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     if user_id not in config.SECRET_ADMINS:
+        return
+    target_user_id = context.user_data.get('manual_reply_user')
+    trans_id = context.user_data.get('manual_trans_id')
+    if not target_user_id:
+        return
+    message_text = update.message.text
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=f"🎉 **خرید شما تأیید شد!**\n\n"
+                 f"🔑 اطلاعات محصول شما:\n"
+                 f"`{message_text}`\n\n"
+                 "📌 لطفاً رمز را تغییر دهید.\n"
+                 "🙏 ممنون از خرید شما!"
+        )
+        await update.message.reply_text("✅ **اطلاعات با موفقیت برای کاربر ارسال شد!**")
+        db.update_transaction_status(trans_id, 'delivered')
+        db.save_chat_message(target_user_id, None, None, f"[ادمین] {message_text}", False)
+        context.user_data['manual_reply_user'] = None
+        context.user_data['manual_trans_id'] = None
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در ارسال: {str(e)}")
+
+# ========== پیام همگانی ==========
+async def broadcast_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in config.SECRET_ADMINS:
         await query.message.edit_text("⛔ دسترسی ندارید!")
         return
-    
-    # دریافت لیست کاربرانی که با ربات چت کردن
-    conn = db.get_db()
-    c = conn.cursor()
-    
-    # جدول چت‌ها رو می‌سازیم (اگه وجود نداشته باشه)
-    c.execute('''CREATE TABLE IF NOT EXISTS chat_history
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER NOT NULL,
-                  username TEXT,
-                  first_name TEXT,
-                  message TEXT,
-                  is_from_user BOOLEAN,
-                  timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    conn.commit()
-    
-    # دریافت کاربران فعال
-    c.execute('''SELECT DISTINCT user_id, username, first_name, MAX(timestamp) as last_msg
-                 FROM chat_history 
-                 GROUP BY user_id 
-                 ORDER BY last_msg DESC LIMIT 50''')
-    users = c.fetchall()
-    conn.close()
-    
-    if not users:
+    await query.message.edit_text(
+        "📢 **ارسال پیام همگانی**\n\n"
+        "لطفاً پیامی که می‌خواید برای **همه کاربران** ارسال بشه رو تایپ کنید.\n"
+        "⏳ ممکنه چند دقیقه طول بکشه."
+    )
+    context.user_data['awaiting_broadcast'] = True
+
+async def handle_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in config.SECRET_ADMINS or not context.user_data.get('awaiting_broadcast'):
+        return
+    text = update.message.text
+    await update.message.reply_text("⏳ در حال ارسال پیام به همه کاربران...")
+    users = db.get_all_users_for_broadcast()
+    success_count = 0
+    fail_count = 0
+    for uid in users:
+        try:
+            await context.bot.send_message(chat_id=uid, text=f"📢 **پیام اطلاع‌رسانی:**\n\n{text}")
+            success_count += 1
+        except Exception:
+            fail_count += 1
+    context.user_data['awaiting_broadcast'] = False
+    await update.message.reply_text(
+        f"✅ **پیام همگانی ارسال شد!**\n\n"
+        f"📨 ارسال موفق: {success_count}\n"
+        f"❌ ارسال ناموفق: {fail_count}"
+    )
+
+# ========== لیست تراکنش‌های در انتظار ==========
+async def pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query.from_user.id not in config.ADMIN_IDS:
+        await query.answer("⛔ دسترسی ندارید!", show_alert=True)
+        return
+    await query.answer()
+    transactions = db.get_pending_transactions()
+    if not transactions:
         await query.message.edit_text(
-            "💬 **چت کاربران**\n\n"
-            "هنوز هیچ کاربری با ربات چت نکرده.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت", callback_data="back_admin")]
-            ])
+            "📊 **تراکنش‌های در انتظار**\n\nهیچ تراکنشی وجود ندارد.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_admin")]])
         )
         return
-    
+    text = "📊 **تراکنش‌های در انتظار:**\n\n"
+    for t in transactions[:10]:
+        text += f"🆔 #{t[0]} - کاربر: {t[1]}\n💰 {t[3]:,} تومان - 📅 {t[7]}\n\n"
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_admin")]])
+    )
+
+# ========== آمار ==========
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in config.ADMIN_IDS:
+        await query.message.edit_text("⛔ دسترسی ندارید!")
+        return
+    stats = db.get_stats()
+    text = (
+        f"📈 **آمار فروشگاه**\n\n"
+        f"👥 تعداد کاربران: {stats['total_users']}\n"
+        f"📦 تعداد تراکنش‌ها: {stats['total_transactions']}\n"
+        f"💰 مجموع فروش: {stats['total_sales']:,} تومان\n"
+        f"⏳ در انتظار تأیید: {stats['pending']}"
+    )
+    await query.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_admin")]])
+    )
+
+# ========== مشاهده چت کاربران ==========
+async def view_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in config.SECRET_ADMINS:
+        await query.message.edit_text("⛔ دسترسی ندارید!")
+        return
+    users = db.get_all_users()
+    if not users:
+        await query.message.edit_text(
+            "💬 **چت کاربران**\n\nهیچ کاربری چت نکرده.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="back_admin")]])
+        )
+        return
     keyboard = []
     for u in users:
-        user_id_db, username, first_name, last_msg = u
+        user_id, username, first_name, _ = u
         label = f"👤 {first_name or 'کاربر'}" + (f" (@{username})" if username else "")
-        keyboard.append([InlineKeyboardButton(
-            label,
-            callback_data=f"chat_user_{user_id_db}"
-        )])
-    
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"chat_user_{user_id}")])
     keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="back_admin")])
-    
     await query.message.edit_text(
-        "💬 **انتخاب کاربر برای مشاهده چت:**\n\n"
-        "روی هر کاربر کلیک کن تا تاریخچه چتش رو ببینی.",
+        "💬 **انتخاب کاربر:**\n\nروی هر کاربر کلیک کن تا چتش رو ببینی.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def show_user_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """نمایش چت یک کاربر خاص"""
     query = update.callback_query
     await query.answer()
-    
-    user_id = query.from_user.id
-    if user_id not in config.SECRET_ADMINS:
+    if query.from_user.id not in config.SECRET_ADMINS:
         await query.message.edit_text("⛔ دسترسی ندارید!")
         return
-    
     target_user_id = int(query.data.split("_")[2])
-    
-    conn = db.get_db()
-    c = conn.cursor()
-    
-    # دریافت اطلاعات کاربر
-    c.execute('''SELECT username, first_name FROM chat_history 
-                 WHERE user_id = ? LIMIT 1''', (target_user_id,))
-    user_info = c.fetchone()
-    
-    # دریافت ۲۰ پیام آخر
-    c.execute('''SELECT message, is_from_user, timestamp 
-                 FROM chat_history 
-                 WHERE user_id = ? 
-                 ORDER BY timestamp DESC LIMIT 20''', (target_user_id,))
-    messages = c.fetchall()
-    conn.close()
-    
+    user_info = db.get_user_info(target_user_id)
+    messages = db.get_user_chat_history(target_user_id, 20)
     if not messages:
-        await query.message.edit_text(
-            "❌ این کاربر هنوز پیامی نداشته.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 بازگشت", callback_data="view_chats")]
-            ])
-        )
+        await query.message.edit_text("❌ این کاربر پیامی نداشته.")
         return
-    
     name = user_info[1] or "کاربر"
     username = f" (@{user_info[0]})" if user_info[0] else ""
-    
-    text = f"💬 **چت با {name}{username}**\n\n"
-    text += f"🆔 آیدی: `{target_user_id}`\n"
-    text += "─" * 20 + "\n\n"
-    
+    text = f"💬 **چت با {name}{username}**\n\n🆔 آیدی: `{target_user_id}`\n\n"
     for msg in reversed(messages):
         sender = "👤 **کاربر:**" if msg[1] else "🤖 **ربات:**"
-        time = msg[2][:16] if msg[2] else ""
-        text += f"{sender}\n`{msg[0][:100]}`\n"
-        text += f"_🕐 {time}_\n\n"
-        if len(text) > 3500:  # محدودیت طول پیام تلگرام
+        text += f"{sender}\n`{msg[0][:100]}`\n_🕐 {msg[2][:16]}_\n\n"
+        if len(text) > 3500:
             break
-    
     keyboard = [
-        [InlineKeyboardButton("📥 ارسال پیام به کاربر", callback_data=f"msg_user_{target_user_id}")],
+        [InlineKeyboardButton("📥 ارسال پیام", callback_data=f"msg_user_{target_user_id}")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="view_chats")]
     ]
-    
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def send_message_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ارسال پیام به کاربر از طریق ادمین"""
     query = update.callback_query
     await query.answer()
-    
-    user_id = query.from_user.id
-    if user_id not in config.SECRET_ADMINS:
+    if query.from_user.id not in config.SECRET_ADMINS:
         await query.message.edit_text("⛔ دسترسی ندارید!")
         return
-    
     target_user_id = int(query.data.split("_")[2])
     context.user_data['reply_to_user'] = target_user_id
-    
     await query.message.edit_text(
-        f"✏️ **ارسال پیام به کاربر**\n\n"
-        f"🆔 آیدی کاربر: `{target_user_id}`\n\n"
-        "📝 پیام خود را به‌صورت متن ارسال کن.\n"
-        "🔙 برای انصراف، /cancel رو بزن.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 انصراف", callback_data="view_chats")]
-        ])
+        f"✏️ **ارسال پیام به کاربر**\n\n🆔 آیدی: `{target_user_id}`\n\n📝 پیام خود را ارسال کن.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 انصراف", callback_data="view_chats")]])
     )
 
-async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ارسال پیام از ادمین به کاربر"""
+async def handle_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
     if user_id not in config.SECRET_ADMINS:
-        await update.message.reply_text("⛔ شما دسترسی ندارید!")
         return
-    
     target_user_id = context.user_data.get('reply_to_user')
     if not target_user_id:
-        await update.message.reply_text("❌ ابتدا از پنل مدیریت یک کاربر رو انتخاب کن!")
         return
-    
     message_text = update.message.text
-    
-    # ارسال به کاربر
     try:
         await context.bot.send_message(
             chat_id=target_user_id,
             text=f"📩 **پیام از ادمین:**\n\n{message_text}"
         )
-        await update.message.reply_text("✅ پیام با موفقیت ارسال شد!")
-        
-        # ثبت در تاریخچه
-        conn = db.get_db()
-        c = conn.cursor()
-        c.execute('''INSERT INTO chat_history (user_id, username, first_name, message, is_from_user) 
-                     VALUES (?, ?, ?, ?, ?)''',
-                  (target_user_id, None, None, f"[ادمین] {message_text}", False))
-        conn.commit()
-        conn.close()
-        
+        await update.message.reply_text("✅ پیام ارسال شد!")
+        db.save_chat_message(target_user_id, None, None, f"[ادمین] {message_text}", False)
     except Exception as e:
-        await update.message.reply_text(f"❌ ارسال پیام ناموفق: {str(e)}")
-    
+        await update.message.reply_text(f"❌ خطا: {str(e)}")
     context.user_data['reply_to_user'] = None
 
-# ========== بقیه کدهای قبلی ==========
+# ========== ویرایش ظاهر ربات ==========
+async def edit_ui_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id not in config.SECRET_ADMINS:
+        await query.message.edit_text("⛔ دسترسی ندارید!")
+        return
+    keyboard = [
+        [InlineKeyboardButton("📝 پیام خوش‌آمدگویی", callback_data="edit_setting_welcome_text")],
+        [InlineKeyboardButton("🔹 دکمه محصولات", callback_data="edit_setting_btn_products")],
+        [InlineKeyboardButton("🔹 دکمه پشتیبانی", callback_data="edit_setting_btn_support")],
+        [InlineKeyboardButton("🔹 دکمه وضعیت خرید", callback_data="edit_setting_btn_status")],
+        [InlineKeyboardButton("🔹 دکمه بازگشت", callback_data="edit_setting_btn_back")],
+        [InlineKeyboardButton("🔹 دکمه ارسال رسید", callback_data="edit_setting_btn_buy")],
+        [InlineKeyboardButton("🔹 دکمه انصراف", callback_data="edit_setting_btn_cancel")],
+        [InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="back_admin")],
+    ]
+    await query.message.edit_text(
+        "✏️ **ویرایش ظاهر ربات**\n\nروی هر گزینه کلیک کن تا متن جدید رو وارد کنی:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-async def approve_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (همون کد قبلی)
-    pass
+async def edit_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    key = query.data.replace("edit_setting_", "")
+    context.user_data['editing_key'] = key
+    current_text = db.get_setting(key)
+    await query.message.edit_text(
+        f"✏️ **ویرایش**\n\n🆔 کلید: `{key}`\n📝 متن فعلی:\n`{current_text}`\n\n📩 **متن جدید رو تایپ و ارسال کن.**"
+    )
 
-async def reject_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (همون کد قبلی)
-    pass
-
-async def pending_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (همون کد قبلی)
-    pass
+async def save_ui_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in config.SECRET_ADMINS:
+        return
+    key = context.user_data.get('editing_key')
+    if not key:
+        return
+    new_value = update.message.text
+    db.update_setting(key, new_value)
+    await update.message.reply_text(f"✅ **متن '{key}' با موفقیت به‌روز شد!**")
+    context.user_data['editing_key'] = None
 
 async def back_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
